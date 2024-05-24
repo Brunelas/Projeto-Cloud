@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Criação de uma VPC com uma instância EC2 configurada com Auto Scaling, um Application Load Balancer (ALB) e um banco de dados DynamoDB.
+
+Parameters:
+  KeyName:
+    Description: Nome da chave SSH para acessar a instância EC2
+    Type: String
+    Default: bruno-keys
+  InstanceType:
+    Description: Tipo de instancia EC2
+    Type: String
+    Default: t2.micro
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: MyVPC
+        - Key: UpdateCheck
+          Value: Update123
+
+  MyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MyInternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref MyInternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref MyInternetGateway
+
+  SubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: MySubnetA
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: MySubnetB
+
+  MyEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permitir trafego para a instancia EC2
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permitir trafego para o ALB
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+
+  MyLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: MyALB
+      Subnets:
+        - Ref: SubnetA
+        - Ref: SubnetB
+      SecurityGroups:
+        - Ref: ALBSecurityGroup
+      Scheme: internet-facing
+
+  MyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref MyVPC
+      TargetType: instance
+
+  MyListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref MyLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MyTargetGroup
+
+  DynamoDBAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource: '*'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: DynamoDBAccessRole
+
+  MyEC2LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-02bf8ce06a8ed6092  # Insira o ID da AMI desejada
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref MyEC2SecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          # Atualizar pacotes
+          sudo yum update -y
+
+          # Instalar Python3 e pip
+          sudo yum install -y python3
+          sudo yum install -y git
+          sudo python3 -m ensurepip
+          sudo pip3 install --upgrade pip
+
+          # Clonar o repositório da aplicação (ajuste a URL conforme necessário)
+          cd /home/ec2-user
+          git clone https://github.com/Brunelas/app-cloud.git
+          cd app-cloud
+
+          # Instalar dependências da aplicação
+          sudo pip install -r requirements.txt
+
+          # Configurar variáveis de ambiente
+          echo "export FLASK_APP=app.py" >> /home/ec2-user/.bash_profile
+          echo "export FLASK_ENV=production" >> /home/ec2-user/.bash_profile
+
+          # Fonte do arquivo bash_profile para carregar variáveis de ambiente
+          source /home/ec2-user/.bash_profile
+
+          # Iniciar a aplicação Flask e direcionar logs para um arquivo
+          sudo nohup flask run --host=0.0.0.0 --port=80 > /home/ec2-user/flask.log 2>&1 &
+
+          # Garantir que o serviço Flask inicie após o reboot
+          echo "@reboot ec2-user source /home/ec2-user/.bash_profile && cd /home/ec2-user/app-cloud && sudo nohup flask run --host=0.0.0.0 --port=80 > /home/ec2-user/flask.log 2>&1 &" | crontab -
+
+  MyAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Ref: SubnetA
+        - Ref: SubnetB
+      LaunchConfigurationName: !Ref MyEC2LaunchConfiguration
+      MinSize: '1'
+      MaxSize: '3'
+      DesiredCapacity: '2'
+      TargetGroupARNs:
+        - !Ref MyTargetGroup
+
+  MyScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref MyAutoScalingGroup
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+
+  MyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarme para monitorar a CPU Utilization da instancia
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref MyAutoScalingGroup
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '70'
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref MyScalingPolicy
+
+  MyDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: MyDynamoDBTable
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: '5'
+        WriteCapacityUnits: '5'
+
+Outputs:
+  VpcId:
+    Description: ID da VPC criada
+    Value: !Ref MyVPC
+  AutoScalingGroupName:
+    Description: Nome do Auto Scaling Group criado
+    Value: !Ref MyAutoScalingGroup
+  DynamoDBTableName:
+    Description: Nome da tabela DynamoDB criada
+    Value: !Ref MyDynamoDBTable
+  LoadBalancerDNSName:
+    Description: DNS do Load Balancer
+    Value: !GetAtt MyLoadBalancer.DNSName
